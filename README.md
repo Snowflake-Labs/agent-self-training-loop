@@ -1,10 +1,10 @@
 # Post-train on AI Gateway traces
 
-Agent trace distillation inside Snowflake. A LangGraph agent runs through Cortex AI Gateway with a frontier model, TruLens scores every run, and Cortex Training post-trains Qwen3-8B on the best-scoring traces. Trajectories are selected with SQL over `AGENT_TRACE_TABLE`, and trace data stays in the Snowflake account.
+Agent trace distillation inside Snowflake. A [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview) agent runs through [Cortex AI Gateway](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-ai-gateway) with a frontier model, [TruLens](https://www.trulens.org/) scores every run, and [Cortex Training](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-training) post-trains [Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) on the best-scoring traces. Trajectories are selected with SQL over [`AGENT_TRACE_TABLE`](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-ai-gateway/observability), and trace data stays in the Snowflake account.
 
 ## Result
 
-49 held-out tasks, 2 rollouts each, same agent harness and same TruLens evaluators for every model. Numbers come from TruLens eval spans in `AGENT_TRACE_TABLE` (`sql/04_compare.sql`).
+49 held-out tasks, 2 rollouts each, same agent harness and same TruLens evaluators for every model. Numbers come from TruLens eval spans in `AGENT_TRACE_TABLE` ([`sql/04_compare.sql`](sql/04_compare.sql)).
 
 | Model | Correct | Answer relevance | Median latency | Avg tool calls |
 |---|---|---|---|---|
@@ -64,30 +64,30 @@ flowchart LR
     dep -.->|"held-out eval with the same harness"| agent
 ```
 
-- TruLens normally exports to its own store. `agent_lib.make_tee_exporter` sends each span to both the local TruLens store, which feedback computation reads, and the gateway's OTLP endpoint `<gateway>/telemetry/v1/traces`. App spans, tool spans and `eval_root`/`eval` spans land in `AGENT_TRACE_TABLE`.
-- Gateway chat spans carry the full prompts and responses (`logging.capture_payload.request_response: true`). The last chat span of a conversation holds the whole trajectory in GenAI semconv message parts.
-- Gateway spans join TruLens records on the `x-snowflake-ai-gateway-conversation-id` header. The same id is passed in the LangGraph `config` metadata and recorded on the TruLens `record_root` span. Eval spans join on `ai.observability.eval.target_record_id`.
-- Feedbacks: `correctness`, which checks the final answer against SQL ground truth in code, and `answer_relevance`, judged by `claude-sonnet-4-6` through the TruLens Cortex provider.
+- TruLens normally exports to its own store. `make_tee_exporter` in [`agent_lib.py`](agent_lib.py) sends each span to both the local TruLens store, which feedback computation reads, and the gateway's OTLP endpoint `<gateway>/telemetry/v1/traces` ([send client traces to the gateway](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-ai-gateway/observability)). App spans, tool spans and `eval_root`/`eval` spans land in `AGENT_TRACE_TABLE`, which uses the standard [event table columns](https://docs.snowflake.com/en/developer-guide/logging-tracing/event-table-columns).
+- Gateway chat spans carry the full prompts and responses (`logging.capture_payload.request_response: true`, set in [`sql/01_gateway_spec.sql`](sql/01_gateway_spec.sql)). The last chat span of a conversation holds the whole trajectory as [OpenTelemetry GenAI semantic convention](https://opentelemetry.io/docs/specs/semconv/gen-ai/) message parts.
+- Gateway spans join TruLens records on the `x-snowflake-ai-gateway-conversation-id` header. The same id is passed in the LangGraph `config` metadata and recorded on the TruLens `record_root` span. Eval spans join on `ai.observability.eval.target_record_id`. The joins are in [`sql/03_trajectories.sql`](sql/03_trajectories.sql).
+- Feedbacks: `correctness`, which checks the final answer against SQL ground truth in code, and `answer_relevance`, judged by `claude-sonnet-4-6` through the TruLens Cortex provider. Snowflake's own TruLens integration is described in [AI Observability](https://docs.snowflake.com/en/user-guide/snowflake-cortex/ai-observability).
 - The task suite (`agent_lib.suite("hard")`) is a synthetic retail-finance SQLite database whose business rules exist only in the system prompt (shipped orders only, net of discounts and returns, region from the customer). Base Qwen3-8B scores 94% on the simpler `basic` suite, so `hard` is the one used for the comparison.
 
 ## Files
 
 | Path | Purpose |
 |---|---|
-| `agent_lib.py` | Task suites, LangGraph agent (gateway, or a Cortex Training deployment), tee exporter, TruLens feedbacks |
-| `bundle/batch_run.py` | Code Bundle entrypoint: rollouts with TruLens, feedback computation, run index in `AGT.ROLLOUT_INDEX` |
-| `bundle/train_from_traces.py` | Code Bundle entrypoint: `TRAINING_SET` to Qwen chat format to Cortex Training LoRA, then a weights-only checkpoint |
-| `sql/01_gateway_spec.sql` | Gateway spec with client telemetry and payload capture |
-| `sql/02_external_access.sql` | EAI limited to the account host |
-| `sql/03_trajectories.sql` | `TRAJECTORIES`, `TRAINING_FUNNEL`, `TRAINING_SET` built from `AGENT_TRACE_TABLE` |
-| `sql/04_compare.sql` | Final comparison from TruLens eval spans |
-| `scripts/mint_pat.py` | Role-restricted PAT into a Snowflake secret, using a temporary key pair |
-| `scripts/deploy.py` | Create or drop a Cortex Training EVALUATION deployment (base model or checkpoint) |
-| `scripts/smoke_test.py` | One local rollout to check spans and eval spans before the batch run |
+| [`agent_lib.py`](agent_lib.py) | Task suites, LangGraph agent (gateway, or a Cortex Training deployment), tee exporter, TruLens feedbacks |
+| [`bundle/batch_run.py`](bundle/batch_run.py) | [Code Bundle](https://docs.snowflake.com/en/sql-reference/sql/create-code-bundle) entrypoint: rollouts with TruLens, feedback computation, run index in `AGT.ROLLOUT_INDEX` |
+| [`bundle/train_from_traces.py`](bundle/train_from_traces.py) | Code Bundle entrypoint: `TRAINING_SET` to Qwen chat format to Cortex Training LoRA, then a weights-only checkpoint |
+| [`sql/01_gateway_spec.sql`](sql/01_gateway_spec.sql) | Gateway spec with client telemetry and payload capture |
+| [`sql/02_external_access.sql`](sql/02_external_access.sql) | [External access integration](https://docs.snowflake.com/en/developer-guide/external-network-access/external-network-access-overview) limited to the account host |
+| [`sql/03_trajectories.sql`](sql/03_trajectories.sql) | `TRAJECTORIES`, `TRAINING_FUNNEL`, `TRAINING_SET` built from `AGENT_TRACE_TABLE` |
+| [`sql/04_compare.sql`](sql/04_compare.sql) | Final comparison from TruLens eval spans |
+| [`scripts/mint_pat.py`](scripts/mint_pat.py) | Role-restricted [PAT](https://docs.snowflake.com/en/user-guide/programmatic-access-tokens) into a Snowflake secret, using a temporary key pair |
+| [`scripts/deploy.py`](scripts/deploy.py) | Create or drop a Cortex Training EVALUATION deployment (base model or checkpoint) |
+| [`scripts/smoke_test.py`](scripts/smoke_test.py) | One local rollout to check spans and eval spans before the batch run |
 
 ## Run it
 
-Prerequisites: a Snowflake account with an AI Gateway, Cortex Training enabled (including model deployments), a CPU compute pool, a warehouse, and a role. The scripts use `CT_QUICKSTART_USER`, `CT_QUICKSTART_DB.AGT`, `CT_QUICKSTART_CPU` (3 nodes) and `CT_QUICKSTART_WH`, with the CLI connection `DEVREL_ENTERPRISE`; change these for your account. The `CT_QUICKSTART_DOWNLOAD_EAI` integration (PyPI, GitHub, Hugging Face) and the `CT_ACCOUNT_RULE` network rule come from the Cortex Training quickstart setup.
+Prerequisites: a Snowflake account with an AI Gateway, Cortex Training enabled (including model deployments), a CPU [compute pool](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/working-with-compute-pool), a warehouse, and a role. The scripts use `CT_QUICKSTART_USER`, `CT_QUICKSTART_DB.AGT`, `CT_QUICKSTART_CPU` (3 nodes) and `CT_QUICKSTART_WH`, with the CLI connection `DEVREL_ENTERPRISE`; change these for your account. The `CT_QUICKSTART_DOWNLOAD_EAI` integration (PyPI, GitHub, Hugging Face) and the `CT_ACCOUNT_RULE` network rule come from the Cortex Training quickstart setup.
 
 ```bash
 C="-c DEVREL_ENTERPRISE --role CT_QUICKSTART_USER --database CT_QUICKSTART_DB --schema AGT --warehouse CT_QUICKSTART_WH"
@@ -122,12 +122,12 @@ snow sql -c DEVREL_ENTERPRISE -f sql/04_compare.sql
 uv run scripts/deploy.py drop <DEPLOYMENT_ID>
 ```
 
-Progress for any run: `scripts/watch.sh <query_id> <run_tag>` (bundle output goes to `AGT.RUN_LOG`).
+Progress for any run: [`scripts/watch.sh`](scripts/watch.sh) `<query_id> <run_tag>` (bundle output goes to `AGT.RUN_LOG`). Bundles run with [`EXECUTE CODE BUNDLE`](https://docs.snowflake.com/en/sql-reference/sql/execute-code-bundle) under the hood.
 
 ## Notes and limits
 
-- `traceparent` propagation through langchain-openai did not join client and gateway spans under one `trace_id`, so they are correlated by conversation id.
-- Cortex Training deployments are EVALUATION class. They hold their GPUs until dropped.
+- [`traceparent`](https://www.w3.org/TR/trace-context/) propagation through langchain-openai did not join client and gateway spans under one `trace_id`, so they are correlated by conversation id.
+- Cortex Training deployments are EVALUATION class. They hold their GPUs until dropped. The deployment API is in the [Cortex Training SDK](https://github.com/snowflakedb/cortex-training).
 - Call the gateway on the `<org>-<account>.snowflakecomputing.com` host. The `<org>-<account_name>` host that `SHOW AI GATEWAYS` returns fails Python TLS hostname checks when the account name contains an underscore.
 - Qwen3's chat template renders past assistant turns without the empty `<think></think>` block, so training uses one example per assistant turn, rendered exactly as the model sees it at that step.
 - Payload capture stores full prompts and responses in the event table. The tasks here are synthetic.
@@ -135,4 +135,15 @@ Progress for any run: `scripts/watch.sh <query_id> <run_tag>` (bundle output goe
 
 ## Cleanup
 
-`sql/00_restore_gateway_spec.sql` restores the original gateway spec. Drop deployments with `scripts/deploy.py drop`, remove the PAT (needs a non-PAT session), and suspend the pool and warehouse.
+[`sql/00_restore_gateway_spec.sql`](sql/00_restore_gateway_spec.sql) restores the original gateway spec. Drop deployments with `scripts/deploy.py drop`, remove the PAT (needs a non-PAT session), and suspend the pool and warehouse.
+
+## Resources
+
+- [Cortex AI Gateway](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-ai-gateway) and [its observability and `AGENT_TRACE_TABLE`](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-ai-gateway/observability)
+- [Cortex Training](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-training) and the [Cortex Training SDK](https://github.com/snowflakedb/cortex-training)
+- [AI Observability with Snowflake Cortex](https://docs.snowflake.com/en/user-guide/snowflake-cortex/ai-observability)
+- [TruLens](https://www.trulens.org/) ([GitHub](https://github.com/truera/trulens))
+- [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview)
+- [CREATE CODE BUNDLE](https://docs.snowflake.com/en/sql-reference/sql/create-code-bundle) and [EXECUTE CODE BUNDLE](https://docs.snowflake.com/en/sql-reference/sql/execute-code-bundle)
+- [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
+- [Qwen3-8B model card](https://huggingface.co/Qwen/Qwen3-8B)
