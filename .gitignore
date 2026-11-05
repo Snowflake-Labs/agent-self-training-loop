@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+# Copied from ../agent_lib.py when a bundle is built; the root copy is the source.
+bundle/agent_lib.py
