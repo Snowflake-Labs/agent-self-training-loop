@@ -16,17 +16,52 @@ Training data: 372 Opus trajectories (2 per train task, 186 tasks), split into 1
 
 ## How it works
 
-```
-LangGraph agent + TruLens (Code Bundle on a CPU compute pool)
-  |  chat calls (conversation-id header)        |  TruLens app + EVAL spans (OTLP)
-  v                                             v
-Cortex AI Gateway ------------------------> AGENT_TRACE_TABLE('SNOWFLAKE')
-                                                |  SQL: join records, eval scores, gateway payloads
-                                                v
-                                   AGT.TRAJECTORIES -> AGT.TRAINING_SET
-                                                |  Code Bundle: Qwen chat template, per-turn loss mask
-                                                v
-                                   Cortex Training LoRA (8 H200) -> checkpoint -> EVALUATION deployment
+```mermaid
+flowchart LR
+    subgraph acct [Snowflake account]
+        direction LR
+
+        subgraph collect [1. Collect and evaluate]
+            direction TB
+            tasks["Task suite with SQL ground truth"]
+            agent["LangGraph agent + TruLens (Code Bundle, CPU pool)"]
+            tasks --> agent
+        end
+
+        subgraph gw [Cortex AI Gateway]
+            teacher["claude-opus-5 (teacher)"]
+        end
+
+        judge["Cortex AI: claude-sonnet-4-6 (TruLens judge)"]
+
+        traces[("AGENT_TRACE_TABLE: gateway chat spans with payloads, TruLens app and EVAL spans")]
+
+        subgraph select [2. Select in SQL]
+            direction TB
+            traj["AGT.TRAJECTORIES"]
+            tset["AGT.TRAINING_SET: correct, relevant, best 2 per task"]
+            traj --> tset
+        end
+
+        subgraph train [3. Post-train]
+            direction TB
+            fmt["Code Bundle: Qwen chat template, per-turn loss mask"]
+            ct["Cortex Training: Qwen3-8B LoRA on 8 H200"]
+            ckpt["Checkpoint"]
+            fmt --> ct --> ckpt
+        end
+
+        dep["EVALUATION deployment (OpenAI-compatible)"]
+    end
+
+    agent -->|"chat calls, conversation-id header"| teacher
+    agent -->|"feedback calls via Snowpark"| judge
+    teacher -->|"chat spans"| traces
+    agent -->|"OTLP: app and EVAL spans"| traces
+    traces --> traj
+    tset --> fmt
+    ckpt --> dep
+    dep -.->|"held-out eval with the same harness"| agent
 ```
 
 - TruLens normally exports to its own store. `agent_lib.make_tee_exporter` sends each span to both the local TruLens store, which feedback computation reads, and the gateway's OTLP endpoint `<gateway>/telemetry/v1/traces`. App spans, tool spans and `eval_root`/`eval` spans land in `AGENT_TRACE_TABLE`.
