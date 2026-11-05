@@ -93,7 +93,7 @@ Progress for any run: `scripts/watch.sh <query_id> <run_tag>` (bundle output goe
 
 - `traceparent` propagation through langchain-openai did not join client and gateway spans under one `trace_id`, so they are correlated by conversation id.
 - Cortex Training deployments are EVALUATION class. They hold their GPUs until dropped.
-- Use `sfdevrel-enterprise.snowflakecomputing.com`-style hosts. The `org-account_name` host with an underscore fails Python TLS hostname checks.
+- Call the gateway on the `<org>-<account>.snowflakecomputing.com` host. The `<org>-<account_name>` host that `SHOW AI GATEWAYS` returns fails Python TLS hostname checks when the account name contains an underscore.
 - Qwen3's chat template renders past assistant turns without the empty `<think></think>` block, so training uses one example per assistant turn, rendered exactly as the model sees it at that step.
 - Payload capture stores full prompts and responses in the event table. The tasks here are synthetic.
 - The teacher's provider terms may restrict training other models on its outputs. Check them before publishing a model trained this way; `agent_lib.TEACHER_MODEL` can be any gateway model, for example `glm-5.3`.
