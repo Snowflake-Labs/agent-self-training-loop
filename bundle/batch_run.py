@@ -29,7 +29,8 @@ ap.add_argument("--rollouts", type=int, default=3)
 ap.add_argument("--limit", type=int, default=0, help="0 = all tasks")
 ap.add_argument("--workers", type=int, default=8)
 ap.add_argument("--splits", default="train,heldout")
-ap.add_argument("--suite", default="basic", choices=["basic", "hard"])
+ap.add_argument("--suite", default="basic", choices=["basic", "hard", "hard2"])
+ap.add_argument("--kinds", default="", help="comma-separated task-id prefixes to keep, e.g. n (new kinds only)")
 ap.add_argument("--model", default=None, help="defaults to agent_lib.TEACHER_MODEL")
 ap.add_argument("--base-url", default=None, help="OpenAI-compatible base URL, e.g. a Cortex Training deployment")
 args, _unknown = ap.parse_known_args()
@@ -84,6 +85,8 @@ try:
       .write.mode("overwrite").save_as_table(f"CT_QUICKSTART_DB.AGT.TASKS_{args.suite.upper()}")
     splits = set(args.splits.split(","))
     chosen = [t for t in tasks if t["split"] in splits]
+    if args.kinds:
+        chosen = [t for t in chosen if t["task_id"].startswith(tuple(args.kinds.split(",")))]
     if args.limit:
         chosen = chosen[: args.limit]
     log(f"tasks total={len(tasks)} chosen={len(chosen)} rollouts={args.rollouts} workers={args.workers}")
@@ -104,6 +107,9 @@ try:
                                      app_version=args.run_tag, feedbacks=feedbacks)
         return local.tru
 
+    import json as _json
+    record_trajectory = L.make_trajectory_recorder()
+
     def run_one(task, k):
         conv = f"{args.run_tag}:{task['task_id']}:{k}"
         graph = L.build_agent(db, pat, conv, model=args.model or L.TEACHER_MODEL, base_url=args.base_url,
@@ -116,12 +122,13 @@ try:
                 res = graph.invoke({"messages": [{"role": "user", "content": task["question"]}]},
                                    config={"metadata": meta, "recursion_limit": 24})
                 text, err = L.final_text(res), None
+                record_trajectory(conversation_id=conv, messages_json=_json.dumps(L.trajectory_messages(res)))
             except Exception as e:  # keep failed rollouts; they are filtered out later
                 text, err = "", f"{type(e).__name__}: {e}"[:500]
         try:
-            rid = rec.get().record_id
+            rid = rec.records[0].record_id  # the graph run; the trajectory span is its own record
         except Exception:
-            rid = None  # join on conversation_id instead
+            rid = conv  # rows join on conversation_id anyway
         return [task["task_id"], k, task["split"], conv, rid, L.is_correct(text, task["answer"]), err, round(time.time() - t, 2)]
 
     rows, done = [], 0

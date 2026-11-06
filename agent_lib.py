@@ -114,7 +114,7 @@ SYSTEM_PROMPT_HARD = (
     "End your reply with a line 'FINAL ANSWER: <value>' where value is a number (no units, percent signs or "
     "thousands separators) or a name."
 )
-SYSTEM_PROMPTS = {"basic": SYSTEM_PROMPT, "hard": SYSTEM_PROMPT_HARD}
+SYSTEM_PROMPTS = {"basic": SYSTEM_PROMPT, "hard": SYSTEM_PROMPT_HARD, "hard2": SYSTEM_PROMPT_HARD}
 SEGMENTS = ["Consumer", "Business"]
 
 _NET_LINES = """
@@ -233,8 +233,55 @@ def make_tasks_hard(conn: sqlite3.Connection, n: int = 240, seed: int = 13, held
     return tasks
 
 
+NEW_KINDS = ["top_category_region_month", "return_value_segment_month", "category_share_region_month",
+             "repeat_buyers_cat_region"]
+
+
+def make_tasks_new(conn: sqlite3.Connection, n: int = 160, seed: int = 29, heldout_frac: float = 0.2,
+                   max_attempts: int = 20000) -> list[dict]:
+    """Question kinds added after round 1 (ids n0000...): the drift a deployed agent sees."""
+    rng = random.Random(seed)
+    q1 = lambda sql, p=(): conn.execute(_NET_LINES + sql, p).fetchone()[0]
+    tasks, seen, attempts = [], set(), 0
+    while len(tasks) < n and attempts < max_attempts:
+        attempts += 1
+        kind = rng.choice(NEW_KINDS)
+        cat, reg, seg, month = rng.choice(CATEGORIES), rng.choice(REGIONS), rng.choice(SEGMENTS), rng.choice(MONTHS)
+        if kind == "top_category_region_month":
+            q = f"Which product category had the highest net revenue from {reg} region customers in {month}? Give the category."
+            a = q1("SELECT category FROM net WHERE region=? AND month=? GROUP BY category "
+                   "ORDER BY SUM(net_value) DESC, category LIMIT 1", (reg, month))
+        elif kind == "return_value_segment_month":
+            q = (f"What was the total value of units returned by {seg} customers on shipped orders placed in {month}, "
+                 "at the discounted price paid? Round to 2 decimals.")
+            a = q1("SELECT SUM(qty_ret*unit_price*(1-discount_pct/100.0)) FROM net WHERE segment=? AND month=?", (seg, month))
+        elif kind == "category_share_region_month":
+            q = (f"What percentage of the {reg} region's net revenue in {month} came from {cat} products? "
+                 "Round to 2 decimals.")
+            tot = q1("SELECT SUM(net_value) FROM net WHERE region=? AND month=?", (reg, month))
+            part = q1("SELECT COALESCE(SUM(net_value),0) FROM net WHERE region=? AND month=? AND category=?", (reg, month, cat))
+            a = None if not tot else 100.0 * part / tot
+        else:
+            q = (f"How many {reg} region customers bought {cat} products on shipped orders in at least two "
+                 "different months?")
+            a = q1("SELECT COUNT(*) FROM (SELECT customer_id FROM net WHERE region=? AND category=? "
+                   "GROUP BY customer_id HAVING COUNT(DISTINCT month) >= 2)", (reg, cat))
+        if a is None or q in seen:
+            continue
+        if isinstance(a, float):
+            a = round(a, 2)
+        seen.add(q)
+        tid = f"n{len(tasks):04d}"
+        split = "heldout" if (int(uuid.uuid5(uuid.NAMESPACE_URL, tid).hex, 16) % 100) < heldout_frac * 100 else "train"
+        tasks.append({"task_id": tid, "kind": kind, "question": q, "answer": a, "split": split})
+    return tasks
+
+
 def suite(name: str):
-    """(db, tasks, system_prompt) for a task suite."""
+    """(db, tasks, system_prompt) for a task suite. hard2 = the hard suite unchanged plus NEW_KINDS."""
+    if name == "hard2":
+        db = build_db_hard()
+        return db, make_tasks_hard(db) + make_tasks_new(db), SYSTEM_PROMPT_HARD
     if name == "hard":
         db = build_db_hard()
         return db, make_tasks_hard(db), SYSTEM_PROMPT_HARD
@@ -363,6 +410,37 @@ def instrument_httpx_propagation(session=None):
 
 def _tag_rollout_impl(task_id: str, split: str, conversation_id: str, run_tag: str) -> str:
     return conversation_id
+
+
+def trajectory_messages(result) -> list[dict]:
+    """LangGraph result -> chat messages (user / assistant with tool_calls / tool), JSON-safe."""
+    out = []
+    for m in result["messages"]:
+        t = getattr(m, "type", None)
+        if t == "human":
+            out.append({"role": "user", "content": content_text(m.content)})
+        elif t == "ai":
+            msg = {"role": "assistant", "content": content_text(m.content).strip()}
+            if m.tool_calls:
+                msg["tool_calls"] = [{"type": "function", "function": {"name": c["name"], "arguments": c["args"]}}
+                                     for c in m.tool_calls]
+            out.append(msg)
+        elif t == "tool":
+            out.append({"role": "tool", "content": content_text(m.content)})
+    return out
+
+
+def _record_trajectory_impl(conversation_id: str, messages_json: str) -> str:
+    return messages_json
+
+
+def make_trajectory_recorder():
+    """Instrumented no-op: puts the rollout's messages as JSON on a span (attribute agt.trajectory),
+    so trajectories are in AGENT_TRACE_TABLE even when the model is not called through the gateway."""
+    from trulens.core.otel.instrument import instrument
+
+    return instrument(attributes=lambda ret, exception, *a, **kw: {"agt.trajectory": ret,
+                                                                     "agt.conversation_id": kw.get("conversation_id")})(_record_trajectory_impl)
 
 
 def make_tagger():

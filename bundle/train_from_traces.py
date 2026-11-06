@@ -26,7 +26,7 @@ ap.add_argument("--epochs", type=float, default=2.0)
 ap.add_argument("--batch-size", type=int, default=8)
 ap.add_argument("--lr", type=float, default=1e-4)
 ap.add_argument("--max-seq-len", type=int, default=8192)
-ap.add_argument("--suite", default="hard", choices=["basic", "hard"])
+ap.add_argument("--suite", default="hard", choices=["basic", "hard", "hard2"])
 ap.add_argument("--dry-run", action="store_true", help="convert + tokenize only; no GPUs")
 args, _ = ap.parse_known_args()
 
@@ -147,14 +147,20 @@ try:
             raise ValueError("no assistant turns")
         return out
 
-    rows = sp.sql("SELECT task_id, record_id, system_instructions, input_messages, output_messages "
-                  "FROM TRAINING_SET WHERE run_tag = ? ORDER BY task_id, rank_in_task",
-                  params=[args.source_run_tag]).collect()
+    def to_chat(r):
+        if r["CHAT_MESSAGES"]:  # recorded trajectory span (deployment calls that bypass the gateway)
+            return [{"role": "system", "content": STUDENT_SYSTEM}] + json.loads(r["CHAT_MESSAGES"])
+        return semconv_to_chat(json.loads(r["SYSTEM_INSTRUCTIONS"] or "[]"), json.loads(r["INPUT_MESSAGES"]),
+                               json.loads(r["OUTPUT_MESSAGES"]), STUDENT_SYSTEM)
+
+    sources = args.source_run_tag.split(",")
+    rows = sp.sql("SELECT run_tag, task_id, record_id, system_instructions, input_messages, output_messages, chat_messages "
+                  f"FROM TRAINING_SET WHERE run_tag IN ({','.join('?' * len(sources))}) ORDER BY run_tag, task_id, rank_in_task",
+                  params=sources).collect()
     examples, skipped, lengths = [], {}, []
     for r in rows:
         try:
-            msgs = semconv_to_chat(json.loads(r["SYSTEM_INSTRUCTIONS"] or "[]"), json.loads(r["INPUT_MESSAGES"]),
-                                   json.loads(r["OUTPUT_MESSAGES"]), STUDENT_SYSTEM)
+            msgs = to_chat(r)
             turns = encode(msgs)
             if max(len(ids) for ids, _ in turns) > args.max_seq_len:
                 raise ValueError("longer than max_seq_len")
@@ -164,15 +170,15 @@ try:
         except Exception as e:
             skipped[str(e)[:80]] = skipped.get(str(e)[:80], 0) + 1
     lengths.sort()
-    stats = {"rows": len(rows), "trajectories": len(rows) - sum(skipped.values()), "turn_examples": len(examples),
+    stats = {"rows": len(rows), "by_source": {s: sum(1 for r in rows if r["RUN_TAG"] == s) for s in sources},
+             "trajectories": len(rows) - sum(skipped.values()), "turn_examples": len(examples),
              "skipped": skipped,
              "tasks": len({e[0] for e in examples}),
              "len_p50": lengths[len(lengths) // 2] if lengths else None, "len_max": lengths[-1] if lengths else None,
              "target_tokens": int(sum(sum(e[2]) for e in examples))}
     log(f"data {json.dumps(stats)}")
     if examples:
-        sample = semconv_to_chat(json.loads(rows[0]["SYSTEM_INSTRUCTIONS"] or "[]"), json.loads(rows[0]["INPUT_MESSAGES"]),
-                                 json.loads(rows[0]["OUTPUT_MESSAGES"]), STUDENT_SYSTEM)
+        sample = to_chat(rows[-1])
         for k, (ids, w) in enumerate(encode(sample)):
             log(f"sample turn {k} targets: " + tok.decode([t for t, wt in zip(ids[1:], w[:-1]) if wt > 0])[:1500])
     if args.dry_run or not examples:

@@ -1,18 +1,39 @@
 # Post-train on AI Gateway traces
 
-Agent trace distillation inside Snowflake. A [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview) agent runs through [Cortex AI Gateway](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-ai-gateway) with a frontier model, [TruLens](https://www.trulens.org/) scores every run, and [Cortex Training](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-training) post-trains [Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) on the best-scoring traces. Trajectories are selected with SQL over [`AGENT_TRACE_TABLE`](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-ai-gateway/observability), and trace data stays in the Snowflake account.
+Continual learning for a small open model, from its own production traces, inside Snowflake. A [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview) agent runs on [Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) served by [Cortex Training](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-training). [TruLens](https://www.trulens.org/) scores every run, and its spans and eval spans land in [`AGENT_TRACE_TABLE`](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-ai-gateway/observability) through [Cortex AI Gateway](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-ai-gateway). SQL selects the runs that passed the evals, and Cortex Training retrains the model on them. Each round, the deployed model gets better at the work it is given. Trace data stays in the Snowflake account.
+
+The loop starts from a seed set: a frontier model ([Claude Opus](https://www.anthropic.com/claude)) answering the round-1 tasks through the gateway. After that, the model learns only from its own traces.
 
 ## Result
 
-49 held-out tasks, 2 rollouts each, same agent harness and same TruLens evaluators for every model. Numbers come from TruLens eval spans in `AGENT_TRACE_TABLE` ([`sql/04_compare.sql`](sql/04_compare.sql)).
+Held-out tasks, 2 rollouts each, same agent harness and same TruLens evaluators for every model. Numbers come from TruLens eval spans in `AGENT_TRACE_TABLE` ([`sql/06_compare_rounds.sql`](sql/06_compare_rounds.sql)).
+
+After round 1, four new question kinds were added to the traffic. The round-1 model had never seen them; they stand in for what changes after an agent ships.
+
+| Model | Round-1 kinds (98 rollouts) | New kinds (60 rollouts) | Training data |
+|---|---|---|---|
+| claude-opus-5 | 100.0% | 100.0% | |
+| Qwen3-8B base | 13.7% | | |
+| Round 1 | 95.9% | 25.0% | 372 Opus seed trajectories |
+| Round 2 | 92.9% | 58.3% | seed + 488 of its own trajectories |
+| Round 3 | 98.0% | 98.3% | seed + 488 + 591 of its own trajectories |
+
+Each production round ran the current model 4 times on every train task (316 tasks). Only runs that the evals scored correct and relevant (relevance ≥ 0.67) were kept, at most 2 per task. New-kind train tasks with at least one kept run grew from 79 of 130 (round-1 model) to 120 of 130 (round-2 model). No new-kind example came from Opus.
+
+How the rounds were run:
+- Every round retrains LoRA r=32 from base Qwen3-8B on the accumulated pool, because the SDK used here has no option to start a training job from an earlier checkpoint.
+- Correctness is checked against SQL ground truth, which a real deployment would not have. Swap in your own evals, such as task success signals, user feedback or an LLM judge.
+- Synthetic task families, one run per round, no hyperparameter search. The round-1 checkpoint scored 90.8% on the round-1 kinds in an earlier evaluation of the same held-out tasks ([`sql/04_compare.sql`](sql/04_compare.sql)). That is a sense of the run-to-run variance at this sample size.
+
+### Round 1 alone (frontier seed)
 
 | Model | Correct | Answer relevance | Median latency | Avg tool calls |
 |---|---|---|---|---|
-| claude-opus-5 (teacher) | 100.0% | 0.997 | 10.8 s | 2.71 |
+| claude-opus-5 | 100.0% | 0.997 | 10.8 s | 2.71 |
 | Qwen3-8B base | 13.7% | 0.708 | 2.8 s | 4.97 |
-| Qwen3-8B post-trained | 90.8% | 0.968 | 2.8 s | 2.41 |
+| Qwen3-8B round 1 | 90.8% | 0.968 | 2.8 s | 2.41 |
 
-Training data: 372 Opus trajectories (2 per train task, 186 tasks), split into 1,031 per-turn examples. LoRA r=32, 2 epochs, 258 steps, loss 1.74 to about 0.11. One synthetic task family, one training run, no hyperparameter search.
+372 Opus trajectories (2 per train task, 186 tasks), split into 1,031 per-turn examples. 2 epochs, 258 steps, loss 1.74 to about 0.11.
 
 ## How it works
 
@@ -80,7 +101,9 @@ flowchart LR
 | [`sql/01_gateway_spec.sql`](sql/01_gateway_spec.sql) | Gateway spec with client telemetry and payload capture |
 | [`sql/02_external_access.sql`](sql/02_external_access.sql) | [External access integration](https://docs.snowflake.com/en/developer-guide/external-network-access/external-network-access-overview) limited to the account host |
 | [`sql/03_trajectories.sql`](sql/03_trajectories.sql) | `TRAJECTORIES`, `TRAINING_FUNNEL`, `TRAINING_SET` built from `AGENT_TRACE_TABLE` |
-| [`sql/04_compare.sql`](sql/04_compare.sql) | Final comparison from TruLens eval spans |
+| [`sql/04_compare.sql`](sql/04_compare.sql) | Round-1 comparison from TruLens eval spans |
+| [`sql/05_self_trajectories.sql`](sql/05_self_trajectories.sql) | Trajectories from the deployed model's own runs (TruLens `agt.trajectory` span), same selection rules |
+| [`sql/06_compare_rounds.sql`](sql/06_compare_rounds.sql) | Held-out correctness by round, round-1 kinds vs new kinds |
 | [`scripts/mint_pat.py`](scripts/mint_pat.py) | Role-restricted [PAT](https://docs.snowflake.com/en/user-guide/programmatic-access-tokens) into a Snowflake secret, using a temporary key pair |
 | [`scripts/deploy.py`](scripts/deploy.py) | Create or drop a Cortex Training EVALUATION deployment (base model or checkpoint) |
 | [`scripts/smoke_test.py`](scripts/smoke_test.py) | One local rollout to check spans and eval spans before the batch run |
@@ -120,6 +143,15 @@ snow bundle execute AGT_BATCH --entrypoint batch_run.py --async $C -- \
   --model <DEPLOYMENT_ID> --base-url https://<account-host>/api/v2/databases/CT_QUICKSTART_DB/schemas/LAB/cortex-training/inference/v1
 snow sql -c DEVREL_ENTERPRISE -f sql/04_compare.sql
 uv run scripts/deploy.py drop <DEPLOYMENT_ID>
+
+# 7. Continual rounds on the deployed model's own traces (suite hard2 adds new question kinds)
+snow bundle execute AGT_BATCH --entrypoint batch_run.py --async $C -- \
+  --suite hard2 --run-tag r1-prod --splits train --rollouts 4 --workers 12 --model <DEPLOYMENT_ID> --base-url <BASE_URL>
+snow sql -c DEVREL_ENTERPRISE -f sql/05_self_trajectories.sql      # set RUN_TAG = 'r1-prod'
+snow bundle execute AGT_TRAIN --entrypoint train_from_traces.py --async $C -- \
+  --run-tag train-r2 --source-run-tag hard-opus-train-v2,r1-prod --suite hard2
+# deploy the new checkpoint, evaluate with --splits heldout --run-tag r2-eval, repeat
+snow sql -c DEVREL_ENTERPRISE -f sql/06_compare_rounds.sql
 ```
 
 Progress for any run: [`scripts/watch.sh`](scripts/watch.sh) `<query_id> <run_tag>` (bundle output goes to `AGT.RUN_LOG`). Bundles run with [`EXECUTE CODE BUNDLE`](https://docs.snowflake.com/en/sql-reference/sql/execute-code-bundle) under the hood.
@@ -127,11 +159,12 @@ Progress for any run: [`scripts/watch.sh`](scripts/watch.sh) `<query_id> <run_ta
 ## Notes and limits
 
 - [`traceparent`](https://www.w3.org/TR/trace-context/) propagation through langchain-openai did not join client and gateway spans under one `trace_id`, so they are correlated by conversation id.
+- Calls to a Cortex Training deployment do not go through the gateway, so there are no gateway chat payloads for them. The harness records each run's messages as JSON on a TruLens span (`agt.trajectory`), which is exported to `AGENT_TRACE_TABLE` with the other spans.
 - Cortex Training deployments are EVALUATION class. They hold their GPUs until dropped. The deployment API is in the [Cortex Training SDK](https://github.com/snowflakedb/cortex-training).
 - Call the gateway on the `<org>-<account>.snowflakecomputing.com` host. The `<org>-<account_name>` host that `SHOW AI GATEWAYS` returns fails Python TLS hostname checks when the account name contains an underscore.
 - Qwen3's chat template renders past assistant turns without the empty `<think></think>` block, so training uses one example per assistant turn, rendered exactly as the model sees it at that step.
 - Payload capture stores full prompts and responses in the event table. The tasks here are synthetic.
-- The teacher's provider terms may restrict training other models on its outputs. Check them before publishing a model trained this way; `agent_lib.TEACHER_MODEL` can be any gateway model, for example `glm-5.3`.
+- The seed model's provider terms may restrict training other models on its outputs. Check them before publishing a model trained this way; `agent_lib.TEACHER_MODEL` can be any gateway model, for example `glm-5.3`. Rounds after the seed use only the model's own outputs.
 
 ## Cleanup
 
