@@ -18,7 +18,25 @@ After round 1, four new question kinds were added to the traffic. The round-1 mo
 | Round 2 | 92.9% | 58.3% | seed + 488 of its own trajectories |
 | Round 3 | 98.0% | 98.3% | seed + 488 + 591 of its own trajectories |
 
-Each production round ran the current model 4 times on every train task (316 tasks). Only runs that the evals scored correct and relevant (relevance ≥ 0.67) were kept, at most 2 per task. New-kind train tasks with at least one kept run grew from 79 of 130 (round-1 model) to 120 of 130 (round-2 model). No new-kind example came from Opus.
+### Where each round's training data came from
+
+| Round | Model that produced the traces | Traffic it ran | Rollouts | Clean finish | Correct | Correct and relevant | Kept (≤2 per task) | Tasks covered |
+|---|---|---|---|---|---|---|---|---|
+| 1 (seed) | claude-opus-5 via AI Gateway | 186 round-1-kind train tasks × 3 | 558 | 558 | 558 | 554 | 372 | 186 |
+| 2 | round-1 Qwen checkpoint | 316 train tasks (186 old + 130 new) × 4 | 1,262 | 1,262 | 870 | 837 | 488 | 265 (79 new) |
+| 3 | round-2 Qwen checkpoint | same 316 × 4 | 1,263 | 1,263 | 1,062 | 1,031 | 591 | 306 (120 new) |
+
+The model for round N trains from base on the seed plus everything kept in earlier rounds: round 2 on 372 + 488 trajectories (2,471 per-turn examples), round 3 on 372 + 488 + 591 (4,273). Held-out tasks are never used for training. No new-kind example came from Opus.
+
+How a run is chosen ([`sql/03_trajectories.sql`](sql/03_trajectories.sql), [`sql/05_self_trajectories.sql`](sql/05_self_trajectories.sql)):
+
+1. **Train split only.** Tasks are assigned to train or held out by a hash of the task id.
+2. **Clean finish.** The run ends with a final assistant message, with no pending tool call and no HTTP error.
+3. **`correctness` = 1.** A TruLens feedback that checks the `FINAL ANSWER:` line against SQL ground truth: case-insensitive exact match for names, within 0.011 for numbers.
+4. **`answer_relevance` ≥ 0.67.** TruLens `relevance_with_cot_reasons`, judged by claude-sonnet-4-6 through the Cortex provider, on a scale of 0 to 1. 0.67 is the middle of the judge's scale, chosen up front and not tuned.
+5. **Best 2 per task.** Rank by relevance, then by fewer model calls, then by fewer output tokens. The cap stops easy tasks, which pass all 4 attempts, from crowding out hard ones.
+
+Both scores are read from TruLens `eval_root` spans in `AGENT_TRACE_TABLE`, joined to the run by `ai.observability.eval.target_record_id`.
 
 How the rounds were run:
 - Every round retrains LoRA r=32 from base Qwen3-8B on the accumulated pool, because the SDK used here has no option to start a training job from an earlier checkpoint.
