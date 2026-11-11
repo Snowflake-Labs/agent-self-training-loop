@@ -15,7 +15,7 @@ from typing import Sequence
 
 # The underscore account URL fails Python TLS hostname checks; the org-account host serves the same gateway.
 GATEWAY = "https://sfdevrel-enterprise.snowflakecomputing.com/api/v2/aigateways/snowflake"
-TEACHER_MODEL = "claude-opus-5"  # frontier teacher; the student is Qwen3-8B post-trained on its best traces
+TEACHER_MODEL = "glm-5.3"  # seed model via the gateway; Qwen3-8B is the model improved round over round
 JUDGE_MODEL = "claude-sonnet-4-6"
 SYSTEM_PROMPT = (
     "You are a retail analytics agent. Answer the user's question using the tools. "
@@ -310,9 +310,127 @@ def is_correct(final_text: str, expected) -> bool:
 
 
 # --------------------------------------------------------------------------- agent
+def run_sql(conn: sqlite3.Connection, query: str) -> str:
+    """The sql_query tool. Deterministic for a given database, so stored runs can be replayed."""
+    if not re.match(r"^\s*(select|with)\b", query, re.IGNORECASE):
+        return "ERROR: only SELECT queries are allowed"
+    try:
+        cur = conn.execute(query)
+        cols = [d[0] for d in cur.description]
+        return json.dumps([dict(zip(cols, r)) for r in cur.fetchmany(50)])
+    except Exception as e:  # surfaced to the model
+        return f"ERROR: {e}"
+
+
+def run_calculator(expression: str) -> str:
+    """The calculator tool."""
+    if not re.fullmatch(r"[0-9.+\-*/() eE]+", expression):
+        return "ERROR: unsupported characters"
+    try:
+        return str(eval(expression, {"__builtins__": {}}, {}))  # noqa: S307 - charset restricted above
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+def tool_text(content) -> str:
+    """A tool message's content as the model sees it."""
+    return content if isinstance(content, str) else json.dumps(content)
+
+
+# Tool schemas exactly as the trainer renders them (bundle/train_from_traces.py TOOLS).
+TOOL_SCHEMAS = [
+    {"type": "function", "function": {
+        "name": "sql_query", "description": "Run a read-only SQLite query and return up to 50 rows as JSON.",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}}},
+    {"type": "function", "function": {
+        "name": "calculator", "description": "Evaluate an arithmetic expression with + - * / ( ) and decimals.",
+        "parameters": {"type": "object", "properties": {"expression": {"type": "string"}}, "required": ["expression"]}}},
+]
+_TOOL_CALL = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+
+
+class Sampler:
+    """A Cortex Training sampling job loaded from a checkpoint, called with pre-rendered token ids.
+
+    Used instead of a model deployment's chat endpoint: the job takes the prompt exactly as the
+    trainer rendered it, so no server-side chat template is involved."""
+
+    MODEL = "Qwen/Qwen3-8B"
+    TOKENIZER_REVISION = "b968826d9c46dd6066d109eabc6255188de91218"
+
+    def __init__(self, client, job_id: str):
+        from transformers import AutoTokenizer
+
+        self.client, self.job_id = client, job_id
+        self.tok = AutoTokenizer.from_pretrained(self.MODEL, revision=self.TOKENIZER_REVISION)
+
+    @classmethod
+    def start(cls, client, source_job_id: str, checkpoint_id: str, n_gpus: int = 4, max_seq_len: int = 8192):
+        lora = {"peft_type": "Lora", "r": 32, "lora_alpha": 32, "lora_dropout": 0.0, "bias": "none",
+                "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]}
+        body = {"hardware": "H200", "idle_timeout_seconds": 900, "sub_job_configs": [
+            {"job_type": "sampling", "model_name": cls.MODEL, "dtype": "bfloat16", "seed": 42,
+             "source_checkpoint_info": {"checkpoint_id": checkpoint_id, "source_job_id": source_job_id},
+             "inference_config": {"max_seq_len": max_seq_len, "n_gpus": n_gpus,
+                                  "vllm_config": {"tensor_parallel_size": n_gpus, "gpu_memory_utilization": 0.8},
+                                  "peft_config": lora}}]}
+        job_id = client.create_job_from_body(body)["job_id"]
+        return cls(client, job_id)
+
+    def complete(self, messages: list[dict], max_tokens: int, temperature: float) -> str:
+        ids = self.tok.apply_chat_template(messages, tools=TOOL_SCHEMAS, tokenize=True,
+                                           add_generation_prompt=True, enable_thinking=False)
+        rid = self.client.generate(self.job_id, [list(ids)],
+                                   sampling_params={"max_tokens": max_tokens, "temperature": temperature})
+        return self.client.poll_request(self.job_id, rid)["results"][0]["text"]
+
+
+def make_sampler_chat_model(sampler: Sampler, temperature: float, max_tokens: int = 1024):
+    """LangChain chat model over a Sampler: renders the Qwen chat template locally and parses
+    <tool_call> blocks into tool calls, the same format the model was trained on."""
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from langchain_core.messages import AIMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    def to_chat(m) -> dict:
+        if m.type == "system":
+            return {"role": "system", "content": content_text(m.content)}
+        if m.type == "human":
+            return {"role": "user", "content": content_text(m.content)}
+        if m.type == "tool":
+            return {"role": "tool", "content": tool_text(m.content)}
+        msg = {"role": "assistant", "content": content_text(m.content).strip()}
+        if m.tool_calls:
+            msg["tool_calls"] = [{"type": "function", "function": {"name": c["name"], "arguments": c["args"]}}
+                                 for c in m.tool_calls]
+        return msg
+
+    class SamplerChatModel(BaseChatModel):
+        @property
+        def _llm_type(self) -> str:
+            return "cortex-training-sampler"
+
+        def bind_tools(self, tools, **kwargs):
+            return self  # the tool schemas are fixed and rendered into every prompt
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            text = sampler.complete([to_chat(m) for m in messages], max_tokens, temperature)
+            calls = []
+            for i, block in enumerate(_TOOL_CALL.findall(text)):
+                try:
+                    c = json.loads(block)
+                    calls.append({"name": c["name"], "args": c.get("arguments") or {}, "id": f"call_{uuid.uuid4().hex[:12]}_{i}"})
+                except (ValueError, KeyError):
+                    continue  # malformed call: left in the text, so the run fails visibly
+            content = _TOOL_CALL.sub("", text).strip() if calls else text.strip()
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content, tool_calls=calls))])
+
+    return SamplerChatModel()
+
+
 def build_agent(conn: sqlite3.Connection, api_key: str, conversation_id: str,
                 model: str = TEACHER_MODEL, base_url: str | None = None, temperature: float = 0.7,
-                system_prompt: str = SYSTEM_PROMPT):
+                system_prompt: str = SYSTEM_PROMPT, sampler: Sampler | None = None):
     from langchain_core.tools import tool
     from langchain_openai import ChatOpenAI
     from langgraph.prebuilt import create_react_agent
@@ -320,25 +438,17 @@ def build_agent(conn: sqlite3.Connection, api_key: str, conversation_id: str,
     @tool
     def sql_query(query: str) -> str:
         """Run a read-only SQLite query and return up to 50 rows as JSON."""
-        if not re.match(r"^\s*(select|with)\b", query, re.IGNORECASE):
-            return "ERROR: only SELECT queries are allowed"
-        try:
-            cur = conn.execute(query)
-            cols = [d[0] for d in cur.description]
-            return json.dumps([dict(zip(cols, r)) for r in cur.fetchmany(50)])
-        except Exception as e:  # surfaced to the model
-            return f"ERROR: {e}"
+        return run_sql(conn, query)
 
     @tool
     def calculator(expression: str) -> str:
         """Evaluate an arithmetic expression with + - * / ( ) and decimals."""
-        if not re.fullmatch(r"[0-9.+\-*/() eE]+", expression):
-            return "ERROR: unsupported characters"
-        try:
-            return str(eval(expression, {"__builtins__": {}}, {}))  # noqa: S307 - charset restricted above
-        except Exception as e:
-            return f"ERROR: {e}"
+        return run_calculator(expression)
 
+    if sampler is not None:
+        # The system prompt is passed as a message, so the template renders it as in training.
+        llm = make_sampler_chat_model(sampler, temperature)
+        return create_react_agent(llm, [sql_query, calculator], prompt=system_prompt + " /no_think")
     if model.startswith("claude"):
         # Claude models are served on the gateway's Anthropic Messages API, not /v1/chat/completions.
         from langchain_anthropic import ChatAnthropic
@@ -358,7 +468,9 @@ def build_agent(conn: sqlite3.Connection, api_key: str, conversation_id: str,
             prompt = system_prompt + " /no_think"
         llm = ChatOpenAI(
             model=model, base_url=base_url or f"{GATEWAY}/v1", api_key=api_key,
-            temperature=temperature, max_retries=2, timeout=120, max_completion_tokens=1024,
+            temperature=temperature, max_retries=8, timeout=180,  # gateway models are rate limited per account
+            # Gateway models such as glm-5.3 reason before answering; the 8B deployment does not.
+            max_completion_tokens=1024 if model.startswith("sf-ct-") else 4096,
             default_headers=headers,
         )
         return create_react_agent(llm, [sql_query, calculator], prompt=prompt)
@@ -426,21 +538,26 @@ def trajectory_messages(result) -> list[dict]:
                                      for c in m.tool_calls]
             out.append(msg)
         elif t == "tool":
-            out.append({"role": "tool", "content": content_text(m.content)})
+            out.append({"role": "tool", "content": tool_text(m.content)})
     return out
 
 
-def _record_trajectory_impl(conversation_id: str, messages_json: str) -> str:
-    return messages_json
+def make_trajectory_recorder(session, app_name: str, app_version: str):
+    """Puts a rollout's messages as JSON on a plain OTel span (attribute agt.trajectory), so
+    trajectories are in AGENT_TRACE_TABLE even when the model is not called through the gateway.
 
+    It is deliberately not a TruLens record: TruLens judges every record it finds, and this
+    span has nothing to judge."""
+    tracer = session._experimental_tracer_provider.get_tracer("agt.trajectory")
 
-def make_trajectory_recorder():
-    """Instrumented no-op: puts the rollout's messages as JSON on a span (attribute agt.trajectory),
-    so trajectories are in AGENT_TRACE_TABLE even when the model is not called through the gateway."""
-    from trulens.core.otel.instrument import instrument
+    def record(conversation_id: str, messages_json: str) -> None:
+        with tracer.start_as_current_span("agt.trajectory") as span:
+            span.set_attribute("ai.observability.app_name", app_name)
+            span.set_attribute("ai.observability.app_version", app_version)
+            span.set_attribute("agt.conversation_id", conversation_id)
+            span.set_attribute("agt.trajectory", messages_json)
 
-    return instrument(attributes=lambda ret, exception, *a, **kw: {"agt.trajectory": ret,
-                                                                     "agt.conversation_id": kw.get("conversation_id")})(_record_trajectory_impl)
+    return record
 
 
 def make_tagger():
@@ -451,20 +568,28 @@ def make_tagger():
 
 
 # --------------------------------------------------------------------------- feedbacks
+# Judges used to select training runs. correctness is computed too, but only for reporting:
+# production traffic has no answer key, so it never gates selection.
+GPA_JUDGES = ["logical_consistency", "execution_efficiency", "tool_selection", "tool_calling"]
+
+
 def make_feedbacks(snowpark_session, tasks_by_question: dict[str, dict]):
-    from trulens.core import Feedback
+    from trulens.core import Feedback, Metric, Selector
     from trulens.providers.cortex import Cortex
 
     provider = Cortex(snowpark_session=snowpark_session, model_engine=JUDGE_MODEL)
 
     def correctness(question, answer: str) -> float:
-        """Programmatic: final answer matches SQL ground truth."""
+        """Programmatic: final answer matches SQL ground truth. Reporting only."""
         t = tasks_by_question.get(question_text(question))
         return 1.0 if t and is_correct(answer, t["answer"]) else 0.0
 
     f_correct = Feedback(correctness, name="correctness").on_input().on_output()
     f_relevance = Feedback(provider.relevance_with_cot_reasons, name="answer_relevance").on_input().on_output()
-    return [f_correct, f_relevance]
+    gpa = [Metric(implementation=getattr(provider, f"{name}_with_cot_reasons"), name=name,
+                  selectors={"trace": Selector(trace_level=True)})
+           for name in GPA_JUDGES]
+    return [f_correct, f_relevance, *gpa]
 
 
 def question_text(value) -> str:
@@ -495,7 +620,8 @@ def final_text(result) -> str:
 
 def content_text(content) -> str:
     """Anthropic messages return content blocks (TruLens records them as a JSON string);
-    keep only the text blocks, dropping thinking/tool_use blocks."""
+    keep only the text blocks, dropping thinking/tool_use blocks. Not for tool results, whose
+    JSON rows look like content blocks; use tool_text for those."""
     if isinstance(content, str) and content.lstrip().startswith("[{"):
         try:
             content = json.loads(content)

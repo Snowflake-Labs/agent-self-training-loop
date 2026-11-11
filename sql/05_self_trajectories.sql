@@ -81,3 +81,31 @@ SELECT run_tag, COUNT(*) rollouts, COUNT_IF(split='train') train,
        COUNT_IF(finish_reason='stop') finished, COUNT_IF(scores:correctness::float = 1) correct
 FROM TRAJECTORIES WHERE run_tag = $RUN_TAG GROUP BY 1;
 SELECT run_tag, COUNT(*) selected, COUNT(DISTINCT task_id) tasks FROM TRAINING_SET WHERE run_tag = $RUN_TAG GROUP BY 1;
+
+-- Judge-only selection: no ground truth. Judges score 0-3, normalized to 0, 1/3, 2/3, 1;
+-- the cutoffs below are 2/3 (>= 0.66) and 1/3 (>= 0.33), written below the stored 0.6667 / 0.3333. correctness is still recorded on every run but used
+-- only to report how often the judges kept a wrong answer.
+CREATE OR REPLACE VIEW TRAINING_SET_JUDGED AS
+SELECT * FROM (
+  SELECT t.*,
+         (scores:answer_relevance::float + scores:logical_consistency::float + scores:execution_efficiency::float
+          + scores:tool_selection::float + scores:tool_calling::float) / 5 AS judge_mean,
+         ROW_NUMBER() OVER (PARTITION BY run_tag, task_id ORDER BY judge_mean DESC, n_chat_calls) AS rank_in_task
+  FROM TRAJECTORIES t
+  WHERE split = 'train'
+    AND chat_messages IS NOT NULL
+    AND NOT any_http_error AND finish_reason = 'stop'
+    AND scores:answer_relevance::float     >= 0.66
+    -- Strict on logical consistency: on round-1 production runs this raised precision on new
+    -- question kinds from 68% to 89% (kept runs that were actually correct).
+    AND scores:logical_consistency::float  = 1
+    AND scores:tool_selection::float       >= 0.66
+    AND scores:tool_calling::float         >= 0.66
+    AND scores:execution_efficiency::float >= 0.33
+)
+WHERE rank_in_task <= 2;
+
+-- Judge precision: of the runs the judges kept, how many were actually correct.
+SELECT run_tag, COUNT(*) AS kept, COUNT(DISTINCT task_id) AS tasks,
+       ROUND(100 * AVG(scores:correctness::float), 1) AS pct_kept_actually_correct
+FROM TRAINING_SET_JUDGED WHERE run_tag = $RUN_TAG GROUP BY 1;

@@ -9,7 +9,8 @@ WITH ev AS (
   SELECT * FROM TABLE(AGENT_TRACE_TABLE('SNOWFLAKE'))
   WHERE start_timestamp >= DATEADD('day', -7, CURRENT_TIMESTAMP())
     AND record_attributes:"ai.observability.app_version"::string
-        IN ('hard-final-opus', 'opus-eval-new', 'hard-final-qwen-base', 'r1-eval', 'r2-eval', 'r3-eval')
+        IN ('hard-final-opus', 'opus-eval-new', 'hard-final-qwen-base', 'r1-eval', 'r2-eval', 'r3-eval',
+            'glm-eval-v2', 'gr1-eval', 'jglm-eval', 'jown1-eval', 'jown2-eval')
 ),
 roots AS (
   SELECT record_attributes:"ai.observability.app_version"::string AS run_tag,

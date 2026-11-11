@@ -27,6 +27,7 @@ ap.add_argument("--batch-size", type=int, default=8)
 ap.add_argument("--lr", type=float, default=1e-4)
 ap.add_argument("--max-seq-len", type=int, default=8192)
 ap.add_argument("--suite", default="hard", choices=["basic", "hard", "hard2"])
+ap.add_argument("--view", default="TRAINING_SET", choices=["TRAINING_SET", "TRAINING_SET_JUDGED"])
 ap.add_argument("--dry-run", action="store_true", help="convert + tokenize only; no GPUs")
 args, _ = ap.parse_known_args()
 
@@ -155,7 +156,7 @@ try:
 
     sources = args.source_run_tag.split(",")
     rows = sp.sql("SELECT run_tag, task_id, record_id, system_instructions, input_messages, output_messages, chat_messages "
-                  f"FROM TRAINING_SET WHERE run_tag IN ({','.join('?' * len(sources))}) ORDER BY run_tag, task_id, rank_in_task",
+                  f"FROM {args.view} WHERE run_tag IN ({','.join('?' * len(sources))}) ORDER BY run_tag, task_id, rank_in_task",
                   params=sources).collect()
     examples, skipped, lengths = [], {}, []
     for r in rows:
