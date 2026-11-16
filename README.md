@@ -151,3 +151,7 @@ Progress for any run: [`scripts/watch.sh`](scripts/watch.sh) `<query_id> <run_ta
 - [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview)
 - [CREATE CODE BUNDLE](https://docs.snowflake.com/en/sql-reference/sql/create-code-bundle) and [EXECUTE CODE BUNDLE](https://docs.snowflake.com/en/sql-reference/sql/execute-code-bundle)
 - [Qwen3-8B model card](https://huggingface.co/Qwen/Qwen3-8B)
+
+## License
+
+Apache 2.0. See [LICENSE](LICENSE).
