@@ -3,6 +3,8 @@
 -- 1. Held-out: share of runs that meet every judge cutoff in TRAINING_SET_JUDGED (the
 --    reference-free signal the promotion gate uses), next to accuracy against the
 --    reference answers (measured only to check the judges). Baseline, drift and overall.
+--    glm-eval-v2's rate-limited (HTTP 429) runs are replaced by their reruns in glm-eval-v2-retry.
+--    An errored run fails the pass rate and is left out of accuracy.
 -- 2. Collected runs on the training tasks: average score (out of 3) and share meeting
 --    each judge's cutoff, per version.
 
@@ -15,15 +17,23 @@ WITH ev AS (
   SELECT * FROM TABLE(AGENT_TRACE_TABLE('SNOWFLAKE'))
   WHERE start_timestamp >= DATEADD('day', -30, CURRENT_TIMESTAMP())
     AND record_attributes:"ai.observability.app_version"::string
-        IN ('glm-eval-v2', 'jglm-eval', 'jown1-eval', 'jown2-eval')
+        IN ('glm-eval-v2', 'glm-eval-v2-retry', 'jglm-eval', 'jown1-eval', 'jown2-eval')
+),
+errored AS (
+  SELECT conversation_id FROM ROLLOUT_INDEX
+  WHERE STARTSWITH(conversation_id, 'glm-eval-v2:') AND error IS NOT NULL
 ),
 roots AS (
-  SELECT record_attributes:"ai.observability.app_version"::string AS run_tag,
+  SELECT IFF(STARTSWITH(record_attributes:"ai.observability.app_version"::string, 'glm-eval-v2'), 'glm-eval-v2',
+             record_attributes:"ai.observability.app_version"::string) AS run_tag,
          record_attributes:"ai.observability.record_id"::string AS record_id,
          PARSE_JSON(record_attributes:"ai.observability.call.kwargs.config"::string):metadata:task_id::string AS task_id
   FROM ev
   WHERE record_attributes:"ai.observability.span_type"::string = 'record_root'
     AND record:"name"::string = 'langgraph.graph.state.CompiledStateGraph.invoke'
+    AND NOT (record_attributes:"ai.observability.app_version"::string = 'glm-eval-v2'
+             AND PARSE_JSON(record_attributes:"ai.observability.call.kwargs.config"::string):metadata:conversation_id::string
+                 IN (SELECT conversation_id FROM errored))
 ),
 sc AS (
   SELECT record_attributes:"ai.observability.eval.target_record_id"::string AS record_id,

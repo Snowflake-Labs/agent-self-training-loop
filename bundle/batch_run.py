@@ -37,6 +37,8 @@ ap.add_argument("--sampler", default=None,
                 help="JOB_ID:CHECKPOINT_ID - serve that checkpoint from a Cortex Training sampling job "
                      "(pre-rendered prompts) instead of a deployment's chat endpoint")
 ap.add_argument("--sampler-gpus", type=int, default=4)
+ap.add_argument("--rerun-errors-of", default=None,
+                help="RUN_TAG - rerun only the (task, rollout) pairs that errored in that run, per ROLLOUT_INDEX")
 args, _unknown = ap.parse_known_args()
 
 HOST = "sfdevrel-enterprise.snowflakecomputing.com"
@@ -161,6 +163,13 @@ try:
 
     rows, done = [], 0
     jobs = [(t, k) for t in chosen for k in range(args.rollouts)]
+    if args.rerun_errors_of:
+        errored = {(r[0], r[1]) for r in sp.sql(
+            "SELECT TASK_ID, ROLLOUT FROM CT_QUICKSTART_DB.AGT.ROLLOUT_INDEX "
+            "WHERE STARTSWITH(CONVERSATION_ID, ?) AND ERROR IS NOT NULL",
+            params=[args.rerun_errors_of + ":"]).collect()}
+        jobs = [(t, k) for t, k in jobs if (t["task_id"], k) in errored]
+        log(f"rerunning {len(jobs)} errored rollouts of {args.rerun_errors_of}")
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futs = [pool.submit(run_one, t, k) for t, k in jobs]
         for f in as_completed(futs):

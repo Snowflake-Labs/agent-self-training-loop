@@ -17,16 +17,18 @@ The seed model (glm-5.3, through the gateway) answers the baseline training task
 
 ## Result
 
-Held-out tasks, 2 runs each. After v1 was trained, four task types it had never seen were added (the drift tasks); no seed traces exist for them. Judge pass rate is the share of runs that meet every cutoff in `TRAINING_SET_JUDGED`. Accuracy against the reference answers is measured only to check the judges. Both come from TruLens eval spans in `AGENT_TRACE_TABLE` ([`sql/07_judge_results.sql`](sql/07_judge_results.sql)).
+Held-out tasks, 2 runs each. After v1 was trained, four task types it had never seen were added (the drift tasks); no seed traces exist for them. Judge pass rate is the share of runs that meet every cutoff in `TRAINING_SET_JUDGED`. Accuracy against the reference answers is measured only to check the judges. Both come from TruLens eval spans in `AGENT_TRACE_TABLE` ([`sql/07_judge_results.sql`](sql/07_judge_results.sql)). An errored run counts as a failure in the pass rate and is left out of accuracy. 28 of glm-5.3's held-out runs first failed on Cortex rate limits (HTTP 429); they were rerun as `glm-eval-v2-retry` (`batch_run.py --rerun-errors-of glm-eval-v2`), and the glm-5.3 row uses the reruns in their place.
 
 | Model | Judge pass: baseline | Judge pass: drift | Judge pass: overall | Accuracy: baseline | Accuracy: drift | Accuracy: overall |
 |---|---|---|---|---|---|---|
-| glm-5.3 (seed) | 69.4% | 71.7% | 70.3% | 100.0% | 96.1% | 98.5% |
+| glm-5.3 (seed) | 84.7% | 86.7% | 85.4% | 98.0% | 96.7% | 97.5% |
 | Qwen3-8B v1 | 62.2% | 13.3% | 43.7% | 89.6% | 34.5% | 68.8% |
 | Qwen3-8B v2 | 72.4% | 45.0% | 62.0% | 88.5% | 76.7% | 84.0% |
 | Qwen3-8B v3 | 90.8% | 76.7% | 85.4% | 89.8% | 93.3% | 91.1% |
 
 Base Qwen3-8B scores 13.7% on the baseline held-out tasks, which is why the loop needs a seed.
+
+With the promotion gate, no version is promoted: v3 passes more often than glm-5.3 on baseline tasks (89 of 98 runs against 83) but less often on drift tasks (46 of 60 against 52).
 
 Training data per version:
 
@@ -58,7 +60,7 @@ From [`sql/08_cost.sql`](sql/08_cost.sql), at the rates in the Snowflake Service
 | Judging, one judge (claude-sonnet-4-6, blended average) | $83 per 1,000 traces |
 | Training | $11 per 1,000 examples |
 
-Reaching v3 cost about $1,230 once (judging 2,952 collected runs with five judges, three training jobs, and collecting traces). At about $7.60 saved per 1,000 tasks, that pays off at about 160,000 tasks, or 29 hours of traffic on the 4 H200s.
+Producing v3 cost about $1,230 once (judging 2,952 collected runs with five judges, three training jobs, and collecting traces). If a version were promoted at v3's serving cost, about $7.60 saved per 1,000 tasks would pay that off at about 160,000 tasks, or 29 hours of traffic on the 4 H200s.
 
 ## Files
 
