@@ -7,7 +7,7 @@ flowchart LR
     S1["1. Run the agent on a larger seed model<br/>(once)"] --> S2["2. Store every trace"]
     S2 --> S3["3. Evaluate traces with LLM judges"]
     S3 --> S4["4. Train the small model on the best traces"]
-    S4 --> G{"New version passes the judges<br/>on both baseline and drift<br/>held-out tasks at least as often<br/>as the production model?"}
+    S4 --> G{"New version passes the judges<br/>on the held-out tasks<br/>at least as often<br/>as the production model?"}
     G -- "no: keep serving the current model;<br/>the new version produces the next traces" --> S2
     G -- "yes" --> P["Promote the new version<br/>to production traffic"]
     P -- "production traces" --> S2
@@ -28,7 +28,7 @@ Held-out tasks, 2 runs each. After v1 was trained, four task types it had never 
 
 Base Qwen3-8B scores 13.7% on the baseline held-out tasks, which is why the loop needs a seed.
 
-With the promotion gate, no version is promoted: v3 passes more often than glm-5.3 on baseline tasks (89 of 98 runs against 83) but less often on drift tasks (46 of 60 against 52).
+The promotion gate compares overall held-out judge pass rate with the serving model. v1 (69 of 158) and v2 (98 of 158) are not promoted. v3 is promoted at 135 of 158, the same as glm-5.3: ahead on baseline (89 of 98 against 83), behind on drift (46 of 60 against 52). v3 is less accurate than glm-5.3 against the reference answers (91.1% against 97.5%).
 
 Training data per version:
 
@@ -60,7 +60,7 @@ From [`sql/08_cost.sql`](sql/08_cost.sql), at the rates in the Snowflake Service
 | Judging, one judge (claude-sonnet-4-6, blended average) | $83 per 1,000 traces |
 | Training | $11 per 1,000 examples |
 
-Producing v3 cost about $1,230 once (judging 2,952 collected runs with five judges, three training jobs, and collecting traces). If a version were promoted at v3's serving cost, about $7.60 saved per 1,000 tasks would pay that off at about 160,000 tasks, or 29 hours of traffic on the 4 H200s.
+Reaching v3 cost about $1,230 once (judging 2,952 collected runs with five judges, three training jobs, and collecting traces). At about $7.60 saved per 1,000 tasks, that pays off at about 160,000 tasks, or 29 hours of traffic on the 4 H200s.
 
 ## Files
 
