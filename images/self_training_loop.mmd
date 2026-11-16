@@ -1,0 +1,17 @@
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Helvetica","primaryTextColor":"#11567f","lineColor":"#11567f","edgeLabelBackground":"#ffffff"},"flowchart":{"curve":"basis"}}}%%
+flowchart LR
+    S1["<b>1. Run the agent on a<br/>larger seed model</b><br/><i>once</i>"] --> S2["<b>2. Store every trace</b>"]
+    S2 --> S3["<b>3. Evaluate traces<br/>with LLM judges</b>"]
+    S3 --> S4["<b>4. Train the small model<br/>on the best traces</b>"]
+    S4 --> G{"<b>Passes the judges on<br/>held-out tasks<br/>at least as often as<br/>the production model?</b>"}
+    G -- "no: keep serving the<br/>current model;<br/>the new version produces<br/>the next traces" --> S2
+    G -- "yes" --> P["<b>Promote the new version<br/>to production traffic</b>"]
+    P -- "production traces" --> S2
+    classDef seed fill:#11567f,stroke:#11567f,color:#ffffff
+    classDef step fill:#e8f6fc,stroke:#29b5e8,color:#11567f
+    classDef gate fill:#fff3e6,stroke:#ff9f36,color:#11567f
+    classDef promo fill:#29b5e8,stroke:#29b5e8,color:#ffffff
+    class S1 seed
+    class S2,S3,S4 step
+    class G gate
+    class P promo

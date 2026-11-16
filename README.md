@@ -1,17 +1,21 @@
-# Post-train on AI Gateway traces
+# The Self-Training Loop
 
-A self-training loop for a small open model, inside one Snowflake account. A [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview) agent runs on [Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B). [TruLens](https://www.trulens.org/) traces every run and scores it with reference-free LLM judges, and the spans and eval spans land in [`AGENT_TRACE_TABLE`](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-ai-gateway/observability) through [Cortex AI Gateway](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-ai-gateway). SQL selects the runs the judges scored well, and [Cortex Training](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-training) trains the next version of the model on them. Traces, scores and training data stay in the account.
+Companion code for the post *The Self-Training Loop: How Periodic Training on Agent Traces Drives Agent Improvement*.
 
-```mermaid
-flowchart LR
-    S1["1. Run the agent on a larger seed model<br/>(once)"] --> S2["2. Store every trace"]
-    S2 --> S3["3. Evaluate traces with LLM judges"]
-    S3 --> S4["4. Train the small model on the best traces"]
-    S4 --> G{"New version passes the judges<br/>on the held-out tasks<br/>at least as often<br/>as the production model?"}
-    G -- "no: keep serving the current model;<br/>the new version produces the next traces" --> S2
-    G -- "yes" --> P["Promote the new version<br/>to production traffic"]
-    P -- "production traces" --> S2
-```
+Every run of an agent produces a record of the task, the steps it took and the answer it gave. If those records are kept and scored, the good ones are training data for the same tasks. Run that periodically and it becomes a loop: each trained model answers the traffic better than the last, so it produces better training data for the next. The loop has four steps. The first runs once; the other three repeat:
+
+1. Run the agent on a larger seed model.
+2. Store every trace.
+3. Evaluate each trace with reference-free LLM judges to find the good ones.
+4. Train a small open model on the best traces, deploy it, and repeat steps 2 to 4 with its own traces.
+
+![The self-training loop](images/self_training_loop.png)
+
+Before a new version takes production traffic, the same judges score it on held-out tasks against the model currently serving. If it passes them less often across the held-out tasks, the current model keeps serving and the new version only generates the next set of training traces. Otherwise it's promoted, and its production traces feed the next pass.
+
+Everything runs in one Snowflake account. A [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview) agent is traced by [TruLens](https://www.trulens.org/), whose app, tool and eval spans land in [`AGENT_TRACE_TABLE`](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-ai-gateway/observability) next to the spans of [Cortex AI Gateway](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-ai-gateway). SQL selects the runs the judges scored well, and [Cortex Training](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-training) trains [Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) on them.
+
+![Reference architecture](images/reference_architecture.png)
 
 The seed model (glm-5.3, through the gateway) answers the baseline training tasks once. Qwen3-8B v1 trains on its judge-approved traces. Every later version is trained on the seed traces plus the judge-approved runs of the versions before it. No reference answer is used to choose training data or to decide which version to promote.
 
@@ -46,7 +50,7 @@ Each version answers the same 316 training tasks 4 times. v1 had a judge-approve
 - **Small-model runs.** Qwen3-8B is served from a Cortex Training sampling job (`--sampler JOB:CKPT`), not through the gateway, so there is no gateway payload for those runs. `make_trajectory_recorder` writes each run's messages as JSON on a plain OTel span (`agt.trajectory`), exported the same way. [`sql/05_self_trajectories.sql`](sql/05_self_trajectories.sql) builds `TRAJECTORIES` rows from it.
 - **Judges.** TruLens `answer_relevance` and the trace-level agent judges `logical_consistency`, `execution_efficiency`, `tool_selection` and `tool_calling`, run by `claude-sonnet-4-6` through the TruLens Cortex provider. A `correctness` feedback compares the `FINAL ANSWER:` line with the SQL reference answer, for measurement only.
 - **Selection** (`TRAINING_SET_JUDGED` in [`sql/05_self_trajectories.sql`](sql/05_self_trajectories.sql)). Train split, clean finish, `logical_consistency` = 3 of 3, relevance, tool selection and tool calling at least 2 of 3, efficiency at least 1 of 3; then the 2 runs per task with the highest mean judge score. TruLens stores 0 to 3 as 0, 0.3333, 0.6667 and 1, so the cutoffs are written as 0.66 and 0.33.
-- **Training.** [`bundle/train_from_traces.py`](bundle/train_from_traces.py) renders each assistant turn as its own example with the Qwen chat template and trains a LoRA (r=32) on 8 H200s. Each version trains from base Qwen3-8B on all traces kept so far, because the SDK version used has no option to start from an earlier checkpoint.
+- **Training.** [`bundle/train_from_traces.py`](bundle/train_from_traces.py) renders each assistant turn as its own example with the Qwen chat template and trains a LoRA (r=32) on 8 H200s. Each version trains from base Qwen3-8B on all traces kept so far, because the Cortex Training SDK version used here can't start a job from an earlier checkpoint, so training cost grows with each pass.
 - **Tasks.** A synthetic retail SQLite database whose business rules exist only in the system prompt (shipped orders only, net of discounts and returns). `agent_lib.suite("hard")` is the baseline set (186 train, 49 held out); `suite("hard2")` adds the drift tasks (130 train, 30 held out).
 
 ## Cost
@@ -59,6 +63,8 @@ From [`sql/08_cost.sql`](sql/08_cost.sql), at the rates in the Snowflake Service
 | Qwen3-8B v3 on 4 H200s, kept busy (4,900 to 6,200 tasks an hour) | $6.15 to $7.80 per 1,000 tasks |
 | Judging, one judge (claude-sonnet-4-6, blended average) | $83 per 1,000 traces |
 | Training | $11 per 1,000 examples |
+
+The judge figure is an average over all 75,640 judge evaluations in the experiment (about $6,255, including held-out scoring). Scoring the 2,952 runs collected for training with five judges cost about $1,120.
 
 Reaching v3 cost about $1,230 once (judging 2,952 collected runs with five judges, three training jobs, and collecting traces). At about $7.60 saved per 1,000 tasks, that pays off at about 160,000 tasks, or 29 hours of traffic on the 4 H200s.
 
