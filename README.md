@@ -2,6 +2,8 @@
 
 Companion code for the post *The Self-Training Loop: How Periodic Training on Agent Traces Drives Agent Improvement*.
 
+The same loop is also a recipe in [cortex-training](https://github.com/snowflakedb/cortex-training), built on its shared helpers and SFT runner: [`recipes/self_training_loop`](https://github.com/snowflakedb/cortex-training/pull/284) (draft PR).
+
 Every run of an agent produces a record of the task, the steps it took and the answer it gave. If those records are kept and scored, the good ones are training data for the same tasks. Run that periodically and it becomes a loop: each trained model answers the traffic better than the last, so it produces better training data for the next. The loop has four steps. The first runs once; the other three repeat:
 
 1. Run the agent on a larger seed model.
