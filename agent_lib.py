@@ -7,14 +7,33 @@ Used by both the local smoke test and the in-Snowflake batch run.
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import sqlite3
 import uuid
 from typing import Sequence
 
-# The underscore account URL fails Python TLS hostname checks; the org-account host serves the same gateway.
-GATEWAY = "https://sfdevrel-enterprise.snowflakecomputing.com/api/v2/aigateways/snowflake"
+HOST = os.environ.get("SNOWFLAKE_HOST", "")
+GATEWAY = f"https://{HOST}/api/v2/aigateways/snowflake"
+
+
+def account_host(session=None) -> str:
+    """SNOWFLAKE_HOST if set, else <org>-<account>.snowflakecomputing.com for the session's account.
+
+    The underscore account URL fails Python TLS hostname checks; the hyphenated org-account host
+    serves the same gateway.
+    """
+    if os.environ.get("SNOWFLAKE_HOST"):
+        return os.environ["SNOWFLAKE_HOST"]
+    org, account = session.sql("SELECT CURRENT_ORGANIZATION_NAME(), CURRENT_ACCOUNT_NAME()").collect()[0]
+    return f"{org}-{account}".lower().replace("_", "-") + ".snowflakecomputing.com"
+
+
+def set_host(host: str) -> None:
+    global HOST, GATEWAY
+    HOST = host
+    GATEWAY = f"https://{host}/api/v2/aigateways/snowflake"
 TEACHER_MODEL = "glm-5.3"  # seed model via the gateway; Qwen3-8B is the model improved round over round
 JUDGE_MODEL = "claude-sonnet-4-6"
 SYSTEM_PROMPT = (

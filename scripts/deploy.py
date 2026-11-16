@@ -16,7 +16,7 @@ import time
 
 from cortex_training.client import CortexTrainingClient
 
-HOST = "sfdevrel-enterprise.snowflakecomputing.com"
+HOST = os.environ["SNOWFLAKE_HOST"]  # <org>-<account>.snowflakecomputing.com
 MODEL = "Qwen/Qwen3-8B"
 LOG = os.path.expanduser("~/.snowflake/agt_lab/deployments.log")
 

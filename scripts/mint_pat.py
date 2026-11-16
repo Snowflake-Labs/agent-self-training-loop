@@ -19,12 +19,11 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 TOKEN_NAME = "AGT_LAB_PAT"
 DAYS = 3
-EXPECTED = ("SFDEVREL", "SFDEVREL_ENTERPRISE")
 LOCAL_PATH = os.path.expanduser("~/.snowflake/agt_lab/pat")
 
 
 def admin_connection():
-    return snowflake.connector.connect(connection_name="DEVREL_ENTERPRISE")
+    return snowflake.connector.connect(connection_name=os.environ["SNOWFLAKE_CONNECTION_NAME"])
 
 
 key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -37,8 +36,8 @@ public_b64 = "".join(
 with admin_connection() as conn, conn.cursor() as cur:
     cur.execute("SELECT CURRENT_ORGANIZATION_NAME(), CURRENT_ACCOUNT_NAME(), CURRENT_USER()")
     org, account, user = cur.fetchone()
-    if (org, account) != EXPECTED:
-        raise SystemExit(f"Refusing to run against {org}.{account}")
+    expected = (org, account)
+    print(f"Minting {TOKEN_NAME} for {user} in {org}.{account}")
     cur.execute(f"DESC USER {user}")
     props = {r[0]: r[1] for r in cur.fetchall()}
     if props.get("RSA_PUBLIC_KEY_2") not in (None, "null", ""):
@@ -57,11 +56,11 @@ try:
         os.chmod(key_path, 0o600)
         try:
             with snowflake.connector.connect(
-                account="SFDEVREL-ENTERPRISE", user=user, role="ACCOUNTADMIN",
+                account=f"{org}-{account}", user=user, role="ACCOUNTADMIN",
                 authenticator="SNOWFLAKE_JWT", private_key_file=key_path,
             ) as kp, kp.cursor() as cur:
                 cur.execute("SELECT CURRENT_ORGANIZATION_NAME(), CURRENT_ACCOUNT_NAME()")
-                if tuple(cur.fetchone()) != EXPECTED:
+                if tuple(cur.fetchone()) != expected:
                     raise SystemExit("Key-pair session reached the wrong account.")
                 cur.execute(f"SHOW USER PROGRAMMATIC ACCESS TOKENS FOR USER {user}")
                 names = [dict(zip([c[0].lower() for c in cur.description], r))["name"] for r in cur.fetchall()]

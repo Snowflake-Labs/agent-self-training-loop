@@ -27,13 +27,14 @@ from trulens.core import TruSession  # noqa: E402
 from trulens.core.database.connector.default import DefaultDBConnector  # noqa: E402
 from trulens.apps.langgraph import TruGraph  # noqa: E402
 
+sp = Session.builder.config("connection_name", os.environ["SNOWFLAKE_CONNECTION_NAME"]).config("role", "CT_QUICKSTART_USER").create()
+L.set_host(L.account_host(sp))
+
 tmp = tempfile.mkdtemp(prefix="trulens-smoke-")
 connector = DefaultDBConnector(database_url=f"sqlite:///{tmp}/t.sqlite")
 tee = L.make_tee_exporter(connector, PAT)
 session = TruSession(connector=connector, span_exporter=tee)
 L.instrument_httpx_propagation(session)
-
-sp = Session.builder.config("connection_name", "DEVREL_ENTERPRISE").config("role", "CT_QUICKSTART_USER").create()
 
 db = L.build_db()
 tasks = L.make_tasks(db)

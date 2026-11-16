@@ -41,7 +41,6 @@ ap.add_argument("--rerun-errors-of", default=None,
                 help="RUN_TAG - rerun only the (task, rollout) pairs that errored in that run, per ROLLOUT_INDEX")
 args, _unknown = ap.parse_known_args()
 
-HOST = "sfdevrel-enterprise.snowflakecomputing.com"
 SDK_REVISION = "b4c26d57bcd741dce4cd63a6ed8f51cff6ba8829"  # same pin as train_from_traces.py
 SDK_SHA256 = "a7860f487ad542204cc0f2c39137ac1be0ef97d9845942d11021e991d839b4df"
 
@@ -80,6 +79,8 @@ try:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     import agent_lib as L
+    HOST = L.account_host(sp)
+    L.set_host(HOST)
     from snowflake.snowpark.secrets import get_generic_secret_string
     from trulens.apps.langgraph import TruGraph
     from trulens.core import TruSession

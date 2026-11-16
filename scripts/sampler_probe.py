@@ -20,7 +20,7 @@ from transformers import AutoTokenizer
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import agent_lib as L  # noqa: E402
 
-HOST = "sfdevrel-enterprise.snowflakecomputing.com"
+HOST = os.environ["SNOWFLAKE_HOST"]  # <org>-<account>.snowflakecomputing.com
 src_job, src_ckpt = sys.argv[1], sys.argv[2]
 pat = open(os.path.expanduser("~/.snowflake/agt_lab/pat")).read().strip()
 client = CortexTrainingClient.from_pat(HOST, pat, "CT_QUICKSTART_DB", "LAB", poll_timeout=1800)

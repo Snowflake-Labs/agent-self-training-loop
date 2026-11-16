@@ -90,15 +90,15 @@ Reaching v3 cost about $1,230 once (judging 2,952 collected runs with five judge
 
 ## Run it
 
-Prerequisites: a Snowflake account with an AI Gateway, Cortex Training, a CPU [compute pool](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/working-with-compute-pool), a warehouse and a role. The scripts use `CT_QUICKSTART_USER`, `CT_QUICKSTART_DB.AGT`, `CT_QUICKSTART_CPU` and `CT_QUICKSTART_WH` with the CLI connection `DEVREL_ENTERPRISE`; change these for your account. The `CT_QUICKSTART_DOWNLOAD_EAI` integration and the `CT_ACCOUNT_RULE` network rule come from the Cortex Training quickstart setup.
+Prerequisites: a Snowflake account with an AI Gateway, Cortex Training, a CPU [compute pool](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/working-with-compute-pool), a warehouse and a role. The scripts use `CT_QUICKSTART_USER`, `CT_QUICKSTART_DB.AGT`, `CT_QUICKSTART_CPU` and `CT_QUICKSTART_WH` with the CLI connection named in `SNOWFLAKE_CONNECTION_NAME`; change these for your account. Set `SNOWFLAKE_HOST` to `<org>-<account>.snowflakecomputing.com` for the local scripts; the Code Bundles work out the host from their session. The `CT_QUICKSTART_DOWNLOAD_EAI` integration and the `CT_ACCOUNT_RULE` network rule come from the Cortex Training quickstart setup.
 
 ```bash
-C="-c DEVREL_ENTERPRISE --role CT_QUICKSTART_USER --database CT_QUICKSTART_DB --schema AGT --warehouse CT_QUICKSTART_WH"
+C="-c $SNOWFLAKE_CONNECTION_NAME --role CT_QUICKSTART_USER --database CT_QUICKSTART_DB --schema AGT --warehouse CT_QUICKSTART_WH"
 
 # Setup: gateway logging, PAT secret, external access, bundles
-snow sql -c DEVREL_ENTERPRISE -f sql/01_gateway_spec.sql
+snow sql -c "$SNOWFLAKE_CONNECTION_NAME" -f sql/01_gateway_spec.sql
 uv run scripts/mint_pat.py
-snow sql -c DEVREL_ENTERPRISE -f sql/02_external_access.sql
+snow sql -c "$SNOWFLAKE_CONNECTION_NAME" -f sql/02_external_access.sql
 cp agent_lib.py bundle/
 snow bundle create AGT_BATCH --source bundle --overwrite $C
 snow bundle create AGT_TRAIN --source bundle --overwrite $C
@@ -106,7 +106,7 @@ snow bundle create AGT_TRAIN --source bundle --overwrite $C
 # Step 1: seed runs on the baseline training tasks (glm-5.3 via the gateway)
 snow bundle execute AGT_BATCH --entrypoint batch_run.py --async $C -- \
   --suite hard --run-tag glm-seed-v2 --splits train --rollouts 3 --workers 4
-snow sql -c DEVREL_ENTERPRISE -f sql/05_self_trajectories.sql     # set RUN_TAG = 'glm-seed-v2'
+snow sql -c "$SNOWFLAKE_CONNECTION_NAME" -f sql/05_self_trajectories.sql     # set RUN_TAG = 'glm-seed-v2'
 
 # Step 4: train v1 on the judge-selected seed traces (all 8 GPUs must be free)
 snow bundle execute AGT_TRAIN --entrypoint train_from_traces.py --async $C -- \
@@ -115,7 +115,7 @@ snow bundle execute AGT_TRAIN --entrypoint train_from_traces.py --async $C -- \
 # Steps 2-3: serve the new version from a sampling job, collect and judge its runs on all training tasks
 snow bundle execute AGT_BATCH --entrypoint batch_run.py --async $C -- \
   --suite hard2 --run-tag jglm-prod --splits train --rollouts 4 --workers 12 --sampler <JOB_ID>:<CHECKPOINT_ID>
-snow sql -c DEVREL_ENTERPRISE -f sql/05_self_trajectories.sql     # set RUN_TAG = 'jglm-prod'
+snow sql -c "$SNOWFLAKE_CONNECTION_NAME" -f sql/05_self_trajectories.sql     # set RUN_TAG = 'jglm-prod'
 
 # Gate: judge the new version on held-out tasks
 snow bundle execute AGT_BATCH --entrypoint batch_run.py --async $C -- \
@@ -125,8 +125,8 @@ snow bundle execute AGT_BATCH --entrypoint batch_run.py --async $C -- \
 snow bundle execute AGT_TRAIN --entrypoint train_from_traces.py --async $C -- \
   --run-tag jt-own1 --source-run-tag glm-seed-v2,jglm-prod --view TRAINING_SET_JUDGED --suite hard2
 
-snow sql -c DEVREL_ENTERPRISE -f sql/07_judge_results.sql
-snow sql -c DEVREL_ENTERPRISE -f sql/08_cost.sql
+snow sql -c "$SNOWFLAKE_CONNECTION_NAME" -f sql/07_judge_results.sql
+snow sql -c "$SNOWFLAKE_CONNECTION_NAME" -f sql/08_cost.sql
 ```
 
 Progress for any run: [`scripts/watch.sh`](scripts/watch.sh) `<query_id> <run_tag>` (bundle output goes to `AGT.RUN_LOG`).

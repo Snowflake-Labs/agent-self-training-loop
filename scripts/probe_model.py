@@ -15,7 +15,7 @@ import time
 
 from cortex_training.client import CortexTrainingClient
 
-HOST = "sfdevrel-enterprise.snowflakecomputing.com"
+HOST = os.environ["SNOWFLAKE_HOST"]  # <org>-<account>.snowflakecomputing.com
 model = sys.argv[1]
 n_gpus = int(sys.argv[2]) if len(sys.argv) > 2 else 8
 wait_s = int(sys.argv[3]) if len(sys.argv) > 3 else 1800

@@ -9,6 +9,7 @@ Args: --run-tag TAG --source-run-tag TAG --epochs N --batch-size N --lr F
 import argparse
 import json
 import math
+import os
 import random
 import subprocess
 import sys
@@ -43,7 +44,9 @@ def log(msg):
     sp.sql("INSERT INTO RUN_LOG SELECT ?, CURRENT_TIMESTAMP(), ?", params=[args.run_tag, str(msg)[:15000]]).collect()
 
 
-HOST = "sfdevrel-enterprise.snowflakecomputing.com"
+# SNOWFLAKE_HOST if set, else the hyphenated <org>-<account> host of the session's account.
+_org, _account = sp.sql("SELECT CURRENT_ORGANIZATION_NAME(), CURRENT_ACCOUNT_NAME()").collect()[0]
+HOST = os.environ.get("SNOWFLAKE_HOST") or f"{_org}-{_account}".lower().replace("_", "-") + ".snowflakecomputing.com"
 MODEL_NAME = "Qwen/Qwen3-8B"
 TOKENIZER_REVISION = "b968826d9c46dd6066d109eabc6255188de91218"
 SDK_REVISION = "b4c26d57bcd741dce4cd63a6ed8f51cff6ba8829"
