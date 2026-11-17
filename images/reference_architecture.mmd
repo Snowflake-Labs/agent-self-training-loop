@@ -1,4 +1,4 @@
-%%{init: {"theme":"base","themeVariables":{"fontFamily":"Helvetica","primaryTextColor":"#11567f","lineColor":"#11567f","edgeLabelBackground":"#ffffff","clusterBkg":"#f5fbfe","clusterBorder":"#29b5e8"},"flowchart":{"curve":"basis"}}}%%
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Helvetica","primaryTextColor":"#11567f","lineColor":"#11567f","edgeLabelBackground":"#f5fbfe","clusterBkg":"#f5fbfe","clusterBorder":"#29b5e8"},"flowchart":{"curve":"basis"}}}%%
 flowchart LR
   subgraph ACCT["Snowflake account"]
     direction LR
@@ -9,14 +9,14 @@ flowchart LR
     subgraph GW["Cortex AI Gateway"]
       G["<b>glm-5.3</b><br/>seed model, once"]
     end
-    T[("<b>AGENT_TRACE_TABLE</b><br/>gateway spans, app spans,<br/>trajectory spans, eval spans")]
+    T[("<b>AGENT_TRACE_TABLE</b><br/>inference spans, app spans,<br/>trajectory spans, eval spans")]
     subgraph SQL["Select in SQL"]
       TR["<b>TRAJECTORIES</b><br/>one row per run"] --> TS["<b>TRAINING_SET_JUDGED</b><br/>judge cutoffs, best 2 per task"]
     end
     CT["<b>Cortex Training</b><br/>Qwen3-8B LoRA on 8 H200"]
     Q["<b>Qwen3-8B vN</b><br/>Cortex Training sampling job, 4 H200"]
     A -- "seed run" --> G
-    G -- "chat spans" --> T
+    G -- "inference spans" --> T
     A -- "judge calls" --> J
     J -- "scores as eval spans<br/>(TruLens, OTLP)" --> T
     A -- "OTLP: app and<br/>trajectory spans" --> T
